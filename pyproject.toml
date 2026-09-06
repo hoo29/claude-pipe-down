@@ -1,0 +1,32 @@
+[tool.ruff]
+target-version = "py38"
+line-length = 120
+extend-exclude = [".github"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "SIM", # simplify
+    "C4",  # comprehensions
+    "RUF", # ruff-specific
+]
+ignore = [
+    "SIM905", # word lists are kept as split strings for readability
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pyright]
+pythonVersion = "3.8"
+include = ["hooks", "tests"]
+extraPaths = ["hooks"]
+typeCheckingMode = "standard"

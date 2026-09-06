@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "pipe-down",
+  "displayName": "Pipe Down",
+  "description": "PreToolUse hook that rejects redundant, verbose or change-history code comments before they are written.",
+  "author": {
+    "name": "Huw McNamara",
+    "url": "https://github.com/hoo29"
+  },
+  "repository": "https://github.com/hoo29/claude-pipe-down",
+  "license": "MIT",
+  "keywords": [
+    "hook",
+    "comments",
+    "code-quality"
+  ],
+  "hooks": "./hooks/hooks.json"
+}

@@ -1,0 +1,17 @@
+{
+  "description": "Rejects Edit, Write and MultiEdit calls that add low-value comments.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/check_comments.py\"",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}
