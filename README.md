@@ -71,6 +71,10 @@ under one cent when that context was cached and about five cents when it was not
 If the request fails for any reason the edit is allowed. `PIPE_DOWN_MODEL` accepts `haiku`,
 `sonnet`, `opus` or a full model id.
 
+`PIPE_DOWN_CLAUDE` replaces the `claude` executable. It is split like a shell command line and
+the judge arguments are appended, so a wrapper that forwards arguments after `--` is set as
+`PIPE_DOWN_CLAUDE="my-wrapper --"`.
+
 ## Configuration
 
 Set these in the `env` block of `settings.json` or in the shell that launches Claude Code.
@@ -88,6 +92,7 @@ Set these in the `env` block of `settings.json` or in the shell that launches Cl
 | `PIPE_DOWN_LLM` | `1` | Set to `0` to disable the model judge |
 | `PIPE_DOWN_MODEL` | `haiku` | Judge model: `haiku`, `sonnet`, `opus` or a full model id |
 | `PIPE_DOWN_LLM_TIMEOUT` | `40` | Seconds to wait for the judge |
+| `PIPE_DOWN_CLAUDE` | `claude` | Command that runs the judge, judge arguments are appended |
 
 ## Supported languages
 

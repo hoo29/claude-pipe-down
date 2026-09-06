@@ -317,6 +317,22 @@ class HookTests(unittest.TestCase):
         inp = {"file_path": "/nonexistent/e.ts", "content": "// Import the required modules\nimport fs from 'fs';\n"}
         self.assertIsNone(run_hook("Write", inp, session="off", env_extra={"PIPE_DOWN_DISABLE": "1"}))
 
+    def test_judge_command_override(self):
+        fake = os.path.join(STATE_DIR, "fake-claude")
+        argv_log = os.path.join(STATE_DIR, "fake-argv")
+        verdict = '{"verdicts":[{"id":0,"verdict":"delete"}]}'
+        with open(fake, "w") as f:
+            f.write(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {argv_log}\n")
+            f.write(f"printf '%s' '{json.dumps({'result': verdict})}'\n")
+        os.chmod(fake, 0o755)
+        inp = {"file_path": "/nonexistent/g.ts", "content": "// retry cap agreed with upstream team\nconst max = 3;\n"}
+        env = {"PIPE_DOWN_LLM": "1", "PIPE_DOWN_CLAUDE": f"{fake} --"}
+        reason = deny_reason("Write", inp, session="override", env_extra=env)
+        self.assertIn("not critical", reason)
+        with open(argv_log) as f:
+            argv = f.read().splitlines()
+        self.assertEqual(argv[:2], ["--", "-p"])
+
     def test_bad_input_allowed(self):
         env = dict(os.environ)
         env["CLAUDE_PLUGIN_DATA"] = STATE_DIR

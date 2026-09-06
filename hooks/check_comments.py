@@ -11,6 +11,7 @@ Configuration is read from environment variables, see README.md.
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -44,6 +45,7 @@ DENSITY_RATIO = _env_int("PIPE_DOWN_DENSITY_PERCENT", 30) / 100.0
 MAX_DENIALS = _env_int("PIPE_DOWN_MAX_DENIALS", 2)
 USE_LLM = _env_flag("PIPE_DOWN_LLM", True)
 LLM_MODEL = os.environ.get("PIPE_DOWN_MODEL", "haiku")
+LLM_COMMAND = shlex.split(os.environ.get("PIPE_DOWN_CLAUDE", "")) or ["claude"]
 LLM_TIMEOUT = _env_int("PIPE_DOWN_LLM_TIMEOUT", 40)
 DISABLED = _env_flag("PIPE_DOWN_DISABLE", False)
 KEEP_MARKER = "pipe-down: keep"
@@ -750,7 +752,7 @@ def _judge_via_cli(prompt):
     env.pop("CLAUDECODE", None)
     proc = subprocess.run(
         [
-            "claude",
+            *LLM_COMMAND,
             "-p",
             "--tools",
             "",
