@@ -744,7 +744,7 @@ LLM_SYSTEM = """You review code comments written by an AI assistant. Apply these
 4. Doc comments (JSDoc, docstrings, rustdoc, javadoc) are allowed for public API but must be concise: one short
    sentence for the summary, tags only where they add information the signature does not.
 When unsure, delete. Respond with JSON only, no prose:
-{"verdicts":[{"id":<number>,"verdict":"keep"|"delete"|"rewrite","text":"<replacement when rewrite>"}]}"""
+{"verdicts":[{"id":<number>,"verdict":"keep"|"delete"|"rewrite"}]}"""
 
 
 def _judge_via_cli(prompt):
@@ -803,8 +803,8 @@ def llm_judge(comments):
         verdict = str(v.get("verdict", "")).lower()
         if verdict == "delete":
             findings.append((c, [("judge", "not critical to understanding")]))
-        elif verdict == "rewrite" and v.get("text"):
-            findings.append((c, [("judge", "rewrite as: {}".format(v["text"]))]))
+        elif verdict == "rewrite":
+            findings.append((c, [("judge", "not concise; shorten or remove")]))
     return findings
 
 

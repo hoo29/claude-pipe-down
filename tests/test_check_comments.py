@@ -227,6 +227,21 @@ class JudgeTests(unittest.TestCase):
             cc.subprocess.run = original
         self.assertEqual([c.text for c, _ in findings], ["set x"])
 
+    def test_rewrite_verdict_gives_no_replacement_text(self):
+        class Proc:
+            returncode = 0
+            stdout = json.dumps({"result": '{"verdicts":[{"id":1,"verdict":"rewrite","text":"Keep this"}]}'})
+
+        original = cc.subprocess.run
+        cc.subprocess.run = lambda *a, **k: Proc()
+        try:
+            findings = cc.llm_judge(self.comments())
+        finally:
+            cc.subprocess.run = original
+        self.assertEqual(
+            [(c.text, p) for c, p in findings], [("keep me", [("judge", "not concise; shorten or remove")])]
+        )
+
     def test_cli_error_payload_allows(self):
         class Proc:
             returncode = 0
