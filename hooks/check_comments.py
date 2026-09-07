@@ -865,7 +865,10 @@ def collect_changes(tool_name, tool_input):
 
 
 def format_reason(path, findings, density):
-    lines = ["pipe-down: this edit adds comments that break the comment rules. Resubmit without them."]
+    lines = [
+        "pipe-down: this edit adds comments that break the comment rules. "
+        "Remove or shorten only the comments listed below, then resubmit."
+    ]
     for c, problems, line_no in findings:
         loc = f"line {line_no}" if line_no is not None else f"snippet line {c.start + 1}"
         preview = c.text if len(c.text) <= 80 else c.text[:77] + "..."
@@ -875,8 +878,8 @@ def format_reason(path, findings, density):
     lines.append(
         "Rules: comment only when critical to understanding the code. Never describe what changed or what "
         "was there before. When a comment is needed, use plain English and as few words as possible. "
-        "Doc comments on public API are fine but must be concise. Do not re-add the comments in a "
-        "different form; leave the code uncommented unless it is critical."
+        "Doc comments on public API are fine but must be concise. Do not re-add the listed comments in a "
+        "different form. Keep every other comment in the file as it was."
     )
     return "\n".join(lines)
 
