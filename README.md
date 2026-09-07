@@ -58,7 +58,9 @@ heuristic cannot block progress. The counter resets after any allowed edit to th
 
 Regex catches history, verbosity and the common restatement patterns. Whether a comment is
 critical is a judgment call, so comments that pass the regex stage are sent to Claude Haiku for a
-keep, delete or rewrite verdict. The judge is on by default. Set `PIPE_DOWN_LLM=0` to turn it off.
+keep, delete or rewrite verdict. A rewrite verdict reports the comment as not concise and leaves the
+wording to the editing model; the judge never suggests replacement text. The judge is on by default.
+Set `PIPE_DOWN_LLM=0` to turn it off.
 
 The judge only runs when an edit adds comments the regex did not already reject, which is a
 minority of edits. All comments from one edit go in a single request. Requests cannot be batched
