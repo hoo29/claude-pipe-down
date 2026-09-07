@@ -267,6 +267,7 @@ class HookTests(unittest.TestCase):
             session="deny1",
         )
         self.assertIn("line 1", reason)
+        self.assertIn("Keep every other comment in the file as it was.", reason)
 
     def test_edit_reports_file_line(self):
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
