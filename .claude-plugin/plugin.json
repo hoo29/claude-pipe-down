@@ -13,6 +13,5 @@
     "hook",
     "comments",
     "code-quality"
-  ],
-  "hooks": "./hooks/hooks.json"
+  ]
 }
