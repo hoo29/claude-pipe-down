@@ -84,7 +84,7 @@ Set these in the `env` block of `settings.json` or in the shell that launches Cl
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PIPE_DOWN_DISABLE` | `0` | Set to `1` to turn the hook off |
-| `PIPE_DOWN_MAX_WORDS` | `15` | Word limit for a non-doc comment |
+| `PIPE_DOWN_MAX_WORDS` | `25` | Word limit for a non-doc comment |
 | `PIPE_DOWN_MAX_LINES` | `3` | Consecutive comment lines that count as a block |
 | `PIPE_DOWN_DOC_MAX_WORDS` | `60` | Word limit for a doc comment |
 | `PIPE_DOWN_DOC_MAX_DESC_WORDS` | `30` | Word limit for a doc comment description before tags |

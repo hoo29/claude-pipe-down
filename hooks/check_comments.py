@@ -36,7 +36,7 @@ def _env_flag(name, default=False):
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
-MAX_WORDS = _env_int("PIPE_DOWN_MAX_WORDS", 15)
+MAX_WORDS = _env_int("PIPE_DOWN_MAX_WORDS", 25)
 MAX_LINES = _env_int("PIPE_DOWN_MAX_LINES", 3)
 DOC_MAX_WORDS = _env_int("PIPE_DOWN_DOC_MAX_WORDS", 60)
 DOC_MAX_DESC_WORDS = _env_int("PIPE_DOWN_DOC_MAX_DESC_WORDS", 30)
