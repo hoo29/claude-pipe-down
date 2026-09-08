@@ -9,7 +9,7 @@
       "name": "pipe-down",
       "source": "./",
       "description": "PreToolUse hook that rejects redundant, verbose or change-history code comments before they are written.",
-      "version": "0.2.0"
+      "version": "0.2.1"
     }
   ]
 }
