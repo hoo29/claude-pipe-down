@@ -122,9 +122,14 @@ pyright
 ```
 
 CI runs ruff, pyright, the tests on Python 3.8 and 3.12, and a JSON syntax check on the manifests.
-`tests/test_perf.py` holds loose timing guards for the regex path. For actual numbers run
-`python3 tests/bench_check_comments.py`, which times Write, Edit and MultiEdit events over 50 to
-5000 line files with the judge off and reports process startup separately.
+`tests/test_perf.py` holds loose timing guards for the regex path and one tight regression test:
+it counts the function calls each benchmark scenario makes and fails if any scenario exceeds
+`tests/perf_baseline.json` by 10 percent. Call counts are deterministic per interpreter, so the
+baseline is keyed by Python version and the test skips on versions without one. After an
+intended change in the amount of work the hook does, refresh with
+`python3 tests/bench_check_comments.py --update-baseline` on each CI Python version. For wall
+clock numbers run `python3 tests/bench_check_comments.py`, which times Write, Edit and MultiEdit
+events over 50 to 5000 line files with the judge off and reports process startup separately.
 
 Test a change by hand:
 

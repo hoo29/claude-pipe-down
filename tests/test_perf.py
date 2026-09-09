@@ -1,4 +1,9 @@
-"""Timing guards for the regex path. Bounds are loose so slow CI runners do not fail them."""
+"""Performance guards for the regex path.
+
+Wall-time bounds are loose so slow CI runners do not fail them. The work-unit test is the tight
+one: it counts function calls, which do not vary with machine load, and fails on a 10 percent
+regression against `perf_baseline.json`.
+"""
 
 import os
 import subprocess
@@ -16,6 +21,7 @@ os.environ.setdefault("CLAUDE_PLUGIN_DATA", tempfile.mkdtemp())
 import bench_check_comments as bench
 
 REPEAT = 5
+TOLERANCE = 0.10
 
 
 def best_ms(fn):
@@ -62,6 +68,22 @@ class PerfTests(unittest.TestCase):
     def test_bdd_test_file_write(self):
         ms = self.check_ms("Write 400-line java test, bdd")
         self.assertLess(ms, 200, f"400-line BDD test file took {ms:.1f} ms")
+
+    def test_work_units_within_tolerance_of_baseline(self):
+        baseline = bench.load_baseline().get(bench.PY_VERSION)
+        if not baseline:
+            self.skipTest(f"no baseline for Python {bench.PY_VERSION}, run bench_check_comments.py --update-baseline")
+        for name, ev in self.by_name.items():
+            with self.subTest(scenario=name):
+                self.assertIn(name, baseline, f"scenario {name!r} missing from baseline, update it")
+                units = bench.work_units(ev)
+                limit = int(baseline[name] * (1 + TOLERANCE))
+                self.assertLessEqual(
+                    units,
+                    limit,
+                    f"{name}: {units} work units, baseline {baseline[name]} allows {limit}. "
+                    "If the extra work is intended, run tests/bench_check_comments.py --update-baseline",
+                )
 
     def test_process_overhead(self):
         env = dict(os.environ)
