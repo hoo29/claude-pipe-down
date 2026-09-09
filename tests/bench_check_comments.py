@@ -1,6 +1,7 @@
 """Benchmark the regex path of the hook on representative edits, judge excluded.
 
-Run: PIPE_DOWN_LLM=0 python3 tests/bench_check_comments.py
+Run: python3 tests/bench_check_comments.py
+Refresh the work-unit baseline for the running Python: python3 tests/bench_check_comments.py --update-baseline
 """
 
 import functools
@@ -22,6 +23,8 @@ os.environ.setdefault("CLAUDE_PLUGIN_DATA", tempfile.mkdtemp())
 import check_comments as cc
 
 SCRIPT = os.path.join(ROOT, "hooks", "check_comments.py")
+BASELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "perf_baseline.json")
+PY_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}"
 
 TS_UNIT = """\
 // Payload must be valid before it reaches the queue
@@ -94,6 +97,48 @@ def run_in_process(ev: Dict[str, Any]) -> str:
         sys.stdin, sys.stdout, sys.stderr, cc.USE_LLM = saved
 
 
+def work_units(ev: Dict[str, Any]) -> int:
+    """Count Python and C function calls made by one hook run.
+
+    Deterministic for a given input and interpreter, unlike wall time, so a baseline can be
+    compared at a tight tolerance. Regex compilation is cached by `re`, so one warm-up run
+    keeps first-use compilation out of the count. The denial counter is cleared so the loop
+    guard cannot change the path taken.
+    """
+    run_in_process(ev)
+    cc.save_state({})
+    n = 0
+
+    def profile(frame: Any, event: str, arg: Any) -> None:
+        nonlocal n
+        if event == "call" or event == "c_call":
+            n += 1
+
+    sys.setprofile(profile)
+    try:
+        run_in_process(ev)
+    finally:
+        sys.setprofile(None)
+    return n
+
+
+def load_baseline() -> Dict[str, Dict[str, int]]:
+    try:
+        with open(BASELINE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def update_baseline(tmp: str) -> None:
+    data = load_baseline()
+    data[PY_VERSION] = {name: work_units(ev) for name, ev in scenarios(tmp)}
+    with open(BASELINE, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    print(f"wrote {BASELINE} for Python {PY_VERSION}")
+
+
 def timeit(fn: Callable[[], object], repeat: int) -> float:
     samples = []
     for _ in range(repeat):
@@ -148,17 +193,23 @@ def subprocess_ms(argv: List[str], stdin: str, repeat: int) -> float:
 
 
 def main() -> None:
-    repeat = int(os.environ.get("BENCH_REPEAT", "20"))
     tmp = tempfile.mkdtemp()
+    if "--update-baseline" in sys.argv[1:]:
+        update_baseline(tmp)
+        return
+    repeat = int(os.environ.get("BENCH_REPEAT", "20"))
+    base = load_baseline().get(PY_VERSION, {})
     rows = []
     for name, ev in scenarios(tmp):
         decision = "deny" if run_in_process(ev) else "allow"
         ms = timeit(functools.partial(run_in_process, ev), repeat)
-        rows.append((name, decision, ms))
+        units = work_units(ev)
+        delta = f"{(units / base[name] - 1) * 100:+.1f}%" if base.get(name) else "n/a"
+        rows.append((name, decision, ms, units, delta))
     width = max(len(r[0]) for r in rows)
-    print(f"{'scenario':<{width}}  result  check ms")
-    for name, decision, ms in rows:
-        print(f"{name:<{width}}  {decision:<6}  {ms:8.2f}")
+    print(f"{'scenario':<{width}}  result  check ms  work units  vs baseline")
+    for name, decision, ms, units, delta in rows:
+        print(f"{name:<{width}}  {decision:<6}  {ms:8.2f}  {units:10d}  {delta:>11}")
 
     small = scenarios(tmp)[0][1]
     startup = subprocess_ms([sys.executable, "-c", "pass"], "", repeat)
