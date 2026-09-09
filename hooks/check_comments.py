@@ -48,6 +48,7 @@ LLM_MODEL = os.environ.get("PIPE_DOWN_MODEL", "haiku")
 LLM_COMMAND = shlex.split(os.environ.get("PIPE_DOWN_CLAUDE", "")) or ["claude"]
 LLM_TIMEOUT = _env_int("PIPE_DOWN_LLM_TIMEOUT", 40)
 DISABLED = _env_flag("PIPE_DOWN_DISABLE", False)
+ALLOW_BDD = _env_flag("PIPE_DOWN_BDD", True)
 KEEP_MARKER = "pipe-down: keep"
 
 # Language table
@@ -192,6 +193,17 @@ def lang_for(path):
         return HASH
     _, ext = os.path.splitext(base)
     return EXTENSIONS.get(ext.lstrip(".") or base.lstrip("."))
+
+
+TEST_PATH_RE = re.compile(
+    r"(?:^|/)(?:tests?|specs?|__tests__|testing)/|"
+    r"(?:^|/)test_[^/]*$|"
+    r"(?:_tests?|_specs?|\.tests?|\.specs?|Tests?|Specs?|IT)\.[A-Za-z0-9]+$"
+)
+
+
+def is_test_path(path):
+    return bool(TEST_PATH_RE.search(path.replace("\\", "/")))
 
 
 # Comment extraction
@@ -439,6 +451,7 @@ EXEMPT_RE = re.compile(
     re.I,
 )
 URL_RE = re.compile(r"https?://|www\.", re.I)
+BDD_RE = re.compile(r"^(?:given|when|then|and|but|arrange|act|assert)\b", re.I)
 
 HISTORY_RE = re.compile(
     r"\b(?:previously|formerly|originally|used to\b|no longer|"
@@ -636,13 +649,20 @@ def restates_code(comment):
     return overlap >= 2 and ratio >= 0.5
 
 
-def is_exempt(comment):
+def is_bdd_marker(comment):
+    """Given/When/Then and Arrange/Act/Assert markers that structure a test body."""
+    return comment.kind != "doc" and BDD_RE.match(comment.text.strip()) is not None
+
+
+def is_exempt(comment, test_file=False):
     text = comment.text
     if KEEP_MARKER in text.lower():
         return True
     if not text.strip():
         return True
     if EXEMPT_RE.search(text) or URL_RE.search(text):
+        return True
+    if test_file and ALLOW_BDD and is_bdd_marker(comment):
         return True
     return bool(comment.raw and comment.raw[0].startswith("#!"))
 
@@ -909,6 +929,7 @@ def main():
         return 0
 
     file_text = read_file(path) if tool_name != "Write" else ""
+    test_file = is_test_path(path)
     findings = []
     unflagged = []
     total_added = 0
@@ -918,11 +939,12 @@ def main():
         if old_string and offset is not None:
             file_text = file_text.replace(old_string, new_text, 1)
         added = added_comments(old_text, new_text, lang)
-        total_added += sum(1 for c in added if c.kind != "doc")
         total_code += max(0, code_line_count(new_text, lang) - (code_line_count(old_text, lang) if old_text else 0))
         for c in added:
-            if is_exempt(c):
+            if is_exempt(c, test_file):
                 continue
+            if c.kind != "doc":
+                total_added += 1
             problems = find_problems(c)
             line_no = (offset + c.start + 1) if offset is not None else None
             if problems:

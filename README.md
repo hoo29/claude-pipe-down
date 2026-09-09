@@ -43,7 +43,15 @@ Doc comments are checked for history, filler, labels, banners and length (60 wor
 since a summary line is expected to describe the declaration.
 
 Never flagged: linter and compiler directives, `TODO` and `FIXME`, URLs, license and copyright
-headers, shebangs, and any comment containing `pipe-down: keep`.
+headers, shebangs, and any comment containing `pipe-down: keep`. Exempt comments do not count
+towards density.
+
+In test files, comments that start with `Given`, `When`, `Then`, `And`, `But`, `Arrange`, `Act` or
+`Assert` are treated as test structure and never flagged, so `// When, then` and
+`// Then the cart is empty` both pass. A file is a test file when a directory in its path is
+`test`, `tests`, `spec`, `specs`, `testing` or `__tests__`, or its name matches `test_*`,
+`*_test.*`, `*.test.*`, `*.spec.*`, `*Test.*`, `*Tests.*`, `*Spec.*` or `*IT.*`. Set
+`PIPE_DOWN_BDD=0` to turn this off.
 
 A comment that explains why is kept even when it also matches the restate or narrative rule.
 Words such as because, otherwise, workaround, race, must, never, deprecated, spec, RFC and
@@ -84,6 +92,7 @@ Set these in the `env` block of `settings.json` or in the shell that launches Cl
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PIPE_DOWN_DISABLE` | `0` | Set to `1` to turn the hook off |
+| `PIPE_DOWN_BDD` | `1` | Set to `0` to check Given/When/Then markers in test files like any other comment |
 | `PIPE_DOWN_MAX_WORDS` | `25` | Word limit for a non-doc comment |
 | `PIPE_DOWN_MAX_LINES` | `3` | Consecutive comment lines that count as a block |
 | `PIPE_DOWN_DOC_MAX_WORDS` | `60` | Word limit for a doc comment |

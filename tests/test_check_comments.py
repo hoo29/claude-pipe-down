@@ -230,6 +230,40 @@ class RuleTests(unittest.TestCase):
             cs = cc.extract_comments(text, lang)
             self.assertTrue(cc.is_exempt(cs[0]), f"expected exemption for {text!r}")
 
+    def test_bdd_markers_exempt_in_test_files(self):
+        for text, lang in [
+            ("// Given\nvar cart = new Cart();\n", cc.C_LIKE),
+            ("// When, then\nassertThrows(X.class, () -> cart.add(null));\n", cc.C_LIKE),
+            ("// Then the cart is empty\nassertTrue(cart.isEmpty());\n", cc.C_LIKE),
+            ("# and the user is logged out\nassert not session.active\n", cc.PYTHON),
+            ("// Arrange\nconst cart = new Cart();\n", cc.C_LIKE),
+        ]:
+            cs = cc.extract_comments(text, lang)
+            self.assertTrue(cc.is_exempt(cs[0], test_file=True), f"expected exemption for {text!r}")
+            self.assertFalse(cc.is_exempt(cs[0]), f"exemption must be limited to test files: {text!r}")
+
+    def test_bdd_marker_needs_leading_keyword(self):
+        cs = cc.extract_comments("// Runs when the cart is empty\nassertTrue(cart.isEmpty());\n", cc.C_LIKE)
+        self.assertFalse(cc.is_exempt(cs[0], test_file=True), "keyword mid-sentence is not a marker")
+        doc = cc.extract_comments("/** Given a cart, adds an item. */\nfunction add() {}\n", cc.C_LIKE)
+        self.assertFalse(cc.is_bdd_marker(doc[0]), "doc comments are not markers")
+
+    def test_test_path_detection(self):
+        for path in [
+            "src/test/java/com/example/CartTest.java",
+            "src/test/kotlin/CartSpec.kt",
+            "Cart.Tests.cs",
+            "pkg/cart_test.go",
+            "tests/test_cart.py",
+            "src/cart.test.ts",
+            "src/__tests__/cart.ts",
+            "spec/cart_spec.rb",
+            "C:\\repo\\tests\\cart.py",
+        ]:
+            self.assertTrue(cc.is_test_path(path), f"expected test path: {path!r}")
+        for path in ["src/main/java/com/example/Cart.java", "src/latest.py", "contest.ts", "src/testing.go"]:
+            self.assertFalse(cc.is_test_path(path), f"not a test path: {path!r}")
+
 
 class DiffTests(unittest.TestCase):
     def test_existing_comments_not_reported(self):
@@ -338,6 +372,38 @@ class HookTests(unittest.TestCase):
             session="multi2",
         )
         self.assertIn("line 6", reason, f"line should account for the earlier edit's inserted line: {reason!r}")
+
+    BDD_TEST = (
+        "class CartTest {\n"
+        "    @Test\n"
+        "    void addsItem() {\n"
+        "        // Given\n"
+        "        var cart = new Cart();\n"
+        "        // When\n"
+        "        cart.add(item);\n"
+        "        // Then\n"
+        "        assertEquals(1, cart.size());\n"
+        "    }\n"
+        "}\n"
+    )
+
+    def test_bdd_markers_allowed_in_test_file(self):
+        out = run_hook("Write", {"file_path": "/nonexistent/src/test/java/CartTest.java", "content": self.BDD_TEST})
+        self.assertIsNone(out, f"BDD markers in a test file must be allowed, got {out!r}")
+
+    def test_bdd_markers_still_checked_outside_tests(self):
+        reason = deny_reason("Write", {"file_path": "/nonexistent/src/main/java/Cart.java", "content": self.BDD_TEST})
+        self.assertIn("line 8", reason, f"Then should be flagged outside test files: {reason!r}")
+
+    def test_bdd_flag_off(self):
+        inp = {"file_path": "/nonexistent/src/test/java/CartTest.java", "content": self.BDD_TEST}
+        out = run_hook("Write", inp, session="bdd-off", env_extra={"PIPE_DOWN_BDD": "0"})
+        self.assertIsNotNone(out, "PIPE_DOWN_BDD=0 must restore the default checks")
+
+    def test_exempt_comments_not_counted_for_density(self):
+        content = "// TODO a\nf();\n// TODO b\ng();\n// TODO c\nh();\n"
+        out = run_hook("Write", {"file_path": "/nonexistent/g.ts", "content": content})
+        self.assertIsNone(out, f"exempt comments must not trip density, got {out!r}")
 
     def test_unknown_extension_ignored(self):
         out = run_hook("Write", {"file_path": "/nonexistent/notes.md", "content": "# Imports\n"})
