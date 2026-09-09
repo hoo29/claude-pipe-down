@@ -122,6 +122,9 @@ pyright
 ```
 
 CI runs ruff, pyright, the tests on Python 3.8 and 3.12, and a JSON syntax check on the manifests.
+`tests/test_perf.py` holds loose timing guards for the regex path. For actual numbers run
+`python3 tests/bench_check_comments.py`, which times Write, Edit and MultiEdit events over 50 to
+5000 line files with the judge off and reports process startup separately.
 
 Test a change by hand:
 
