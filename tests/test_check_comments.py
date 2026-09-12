@@ -125,6 +125,33 @@ class ExtractionTests(unittest.TestCase):
         ]:
             self.assertIs(cc.lang_for(path), lang, f"lang_for({path!r})")
 
+    def test_multiline_string_body_is_not_a_comment(self):
+        for text, lang in [
+            ('HELP = """\n# Imports\nfoo\n"""\nx = 1  # real\n', cc.PYTHON),
+            ("const s = `\n// Load the config\n`; // real\nx();\n", cc.C_LIKE),
+            ("var t = `\n// Helpers\n`\nx := 1 // real\n", cc.GO),
+            ('val s = """\n// Helpers\n"""\nx() // real\n', cc.C_LIKE),
+        ]:
+            cs = cc.extract_comments(text, lang)
+            self.assertEqual([c.text for c in cs], ["real"], f"string body must not be a comment: {text!r}")
+
+    def test_unterminated_single_quote_does_not_carry_over(self):
+        text = "fn f<'a>() {}\n// real\nx();\n"
+        self.assertEqual([c.text for c in cc.extract_comments(text, cc.C_LIKE)], ["real"])
+
+    def test_empty_doc_block_closes(self):
+        text = "/**/\nconst a = 1;\n// Helpers\nfunction x() {}\n"
+        cs = cc.extract_comments(text, cc.C_LIKE)
+        self.assertEqual([(c.kind, c.text) for c in cs], [("doc", ""), ("line", "Helpers")], f"got {cs!r}")
+        self.assertEqual(cs[0].end, 0, "/**/ must close on its own line")
+
+    def test_next_code_skips_block_comment_body(self):
+        text = "// Build the request\n/**\n * Request builder\n */\nfunction f() {}\n"
+        cs = cc.extract_comments(text, cc.C_LIKE)
+        self.assertEqual(cs[0].next_code, "function f() {}", "next_code must not be a block comment line")
+        cs = cc.extract_comments('# note\n"""\nfunc helper() {\n"""\nreturn x\n', cc.PYTHON)
+        self.assertEqual(cs[0].next_code, "return x", "next_code must skip a docstring body")
+
     def test_comment_after_shebang_is_kept(self):
         text = "#!/usr/bin/env python\n# Import the modules\nimport os\n"
         cs = cc.extract_comments(text, cc.PYTHON)
@@ -151,6 +178,16 @@ class RuleTests(unittest.TestCase):
         self.assertRule("history", "// Changed to use async instead of sync\nawait f();\n", cc.C_LIKE)
         self.assertRule("history", "# Previously this returned a list\nreturn x\n", cc.PYTHON)
         self.assertRule("history", "# No longer needed after the refactor\nreturn x\n", cc.PYTHON)
+        self.assertRule("history", "// Used to be synchronous\nawait f();\n", cc.C_LIKE)
+        self.assertRule("history", "// Leftover from the old parser\nf();\n", cc.C_LIKE)
+        for text in [
+            "// Used to detect cycles in the graph\nf();\n",
+            "// Leftover bytes are padding\nf();\n",
+            "// No longer valid after expiry\nf();\n",
+            "// Extracted from the JWT header\nf();\n",
+            "// Restored from the snapshot on boot\nf();\n",
+        ]:
+            self.assertNoRule("history", text, cc.C_LIKE)
 
     def test_restate(self):
         self.assertRule("restate", "// Parse and return the JSON\nreturn JSON.parse(raw);\n", cc.C_LIKE)
@@ -160,15 +197,28 @@ class RuleTests(unittest.TestCase):
     def test_narrative(self):
         self.assertRule("narrative", "// Import the required modules\nimport fs from 'fs';\n", cc.C_LIKE)
         self.assertRule("narrative", "// Now we iterate over each entry\nfor (const e of xs) {}\n", cc.C_LIKE)
+        self.assertRule("narrative", "// Push the item onto the stack\nf();\n", cc.C_LIKE)
+        self.assertRule("narrative", "// Hash the password\nf();\n", cc.C_LIKE)
+        for text in [
+            "// Format: <major>.<minor>\nf();\n",
+            "// Sign bit lives in the top byte\nf();\n",
+            "// Stop words are dropped\nf();\n",
+            "// Hash of the parent block\nf();\n",
+        ]:
+            self.assertNoRule("narrative", text, cc.C_LIKE)
 
     def test_label_and_banner(self):
         self.assertRule("label", "// Helpers\nfunction a() {}\n", cc.C_LIKE)
         self.assertRule("label", "# Imports\nimport os\n", cc.PYTHON)
         self.assertRule("banner", "// ------ Setup ------\nlet a;\n", cc.C_LIKE)
         self.assertRule("banner", "# ==========\nx = 1\n", cc.PYTHON)
+        self.assertRule("banner", "// ...---...\nlet a;\n", cc.C_LIKE)
+        self.assertNoRule("banner", "// wait for ack ... then retry\nf();\n", cc.C_LIKE)
+        self.assertNoRule("banner", "// ... then retry\nf();\n", cc.C_LIKE)
 
     def test_filler(self):
         self.assertRule("filler", f"// {FILLER} handling the request\nfunction f() {{}}\n", cc.C_LIKE)
+        self.assertNoRule("filler", "// Clean up on SIGTERM so the lock file is released\nf();\n", cc.C_LIKE)
 
     def test_length(self):
         over = f"// {padding(cc.MAX_WORDS + 1)}\nfunction f() {{}}\n"
@@ -259,9 +309,17 @@ class RuleTests(unittest.TestCase):
             "src/__tests__/cart.ts",
             "spec/cart_spec.rb",
             "C:\\repo\\tests\\cart.py",
+            "src/CartIT.java",
         ]:
             self.assertTrue(cc.is_test_path(path), f"expected test path: {path!r}")
-        for path in ["src/main/java/com/example/Cart.java", "src/latest.py", "contest.ts", "src/testing.go"]:
+        for path in [
+            "src/main/java/com/example/Cart.java",
+            "src/latest.py",
+            "contest.ts",
+            "src/testing.go",
+            "src/LIMIT.go",
+            "src/SUBMIT.js",
+        ]:
             self.assertFalse(cc.is_test_path(path), f"not a test path: {path!r}")
 
 
@@ -269,14 +327,17 @@ class DiffTests(unittest.TestCase):
     def test_existing_comments_not_reported(self):
         old = "// Import the required modules\nimport fs from 'fs';\n"
         new = old + "const a = 1;\n"
-        added = cc.added_comments(old, new, cc.C_LIKE)
+        added = cc.added_comments(cc.extract_comments(old, cc.C_LIKE), cc.extract_comments(new, cc.C_LIKE))
         self.assertEqual(added, [], f"unchanged comment must not be reported as added, got {added!r}")
 
     def test_rewritten_comment_is_added(self):
         old = "// Import the required modules\nimport fs from 'fs';\n"
         new = "// Import the modules\nimport fs from 'fs';\n"
         self.assertEqual(
-            [c.text for c in cc.added_comments(old, new, cc.C_LIKE)],
+            [
+                c.text
+                for c in cc.added_comments(cc.extract_comments(old, cc.C_LIKE), cc.extract_comments(new, cc.C_LIKE))
+            ],
             ["Import the modules"],
             "rewritten comment should count as added",
         )
@@ -317,6 +378,27 @@ class JudgeTests(unittest.TestCase):
             [("keep me", [("judge", "not concise; shorten or remove")])],
             "rewrite verdict should flag the comment without echoing replacement text",
         )
+
+    def test_out_of_range_and_repeated_ids_ignored(self):
+        verdicts = [
+            {"id": -1, "verdict": "delete"},
+            {"id": 0, "verdict": "delete"},
+            {"id": 0, "verdict": "rewrite"},
+            {"id": 7, "verdict": "delete"},
+            {"id": True, "verdict": "delete"},
+            "junk",
+        ]
+        findings = self.judge_with(json.dumps({"structured_output": {"verdicts": verdicts}}))
+        self.assertEqual(
+            [(c.text, p) for c, p in findings],
+            [("set x", [("judge", "not critical to understanding")])],
+            f"only the first in-range verdict per id may count, got {findings!r}",
+        )
+
+    def test_non_list_verdicts_fail_open(self):
+        for payload in [{"verdicts": None}, {"verdicts": 3}, {"verdicts": "x"}, [], 5]:
+            findings = self.judge_with(json.dumps({"structured_output": payload}))
+            self.assertEqual(findings, [], f"{payload!r} must fail open, got {findings!r}")
 
     def test_cli_error_payload_allows(self):
         stdout = json.dumps({"is_error": True, "result": "Not logged in"})

@@ -34,7 +34,7 @@ Requires `python3` on `PATH`. No third-party packages.
 | label | `// Helpers`, `# Imports` | section label |
 | banner | `// ---------- Setup ----------` | decorative banner |
 | filler | `This function is responsible for ...`, `we need to`, `note that` | filler wording |
-| long | non-doc comment over 15 words | word limit |
+| long | non-doc comment over 25 words | word limit |
 | block | 3 or more consecutive comment lines | comment block |
 | density | 3 or more comments at over 30 percent of added code lines | too many comments |
 
@@ -50,7 +50,7 @@ In test files, comments that start with `Given`, `When`, `Then`, `And`, `But`, `
 `Assert` are treated as test structure and never flagged, so `// When, then` and
 `// Then the cart is empty` both pass. A file is a test file when a directory in its path is
 `test`, `tests`, `spec`, `specs`, `testing` or `__tests__`, or its name matches `test_*`,
-`*_test.*`, `*.test.*`, `*.spec.*`, `*Test.*`, `*Tests.*`, `*Spec.*` or `*IT.*`. Set
+`*_test.*`, `*.test.*`, `*.spec.*`, `*Test.*`, `*Tests.*`, `*Spec.*`, `*Specs.*` or `*IT.*`. Set
 `PIPE_DOWN_BDD=0` to turn this off.
 
 A comment that explains why is kept even when it also matches the restate or narrative rule.
@@ -146,5 +146,5 @@ Use `CLAUDE_PLUGIN_DATA` to point the denial counter at a scratch directory when
 
 Heuristics judge text, not intent. A short explanatory comment without a why-word can be flagged
 as restatement. The loop guard and the `pipe-down: keep` marker exist for those cases.
-Comment detection is line based and string aware, but regex literals containing `//` and
-unusual multi-line string forms can confuse it.
+Comment detection is line based and string aware. Template literals, Go raw strings and triple
+quoted strings may span lines, but regex literals containing `//` and shell heredocs can confuse it.
