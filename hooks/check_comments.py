@@ -761,10 +761,30 @@ LLM_SYSTEM = """You review code comments written by an AI assistant. Apply these
    narrate steps, label sections, or explain standard language features are not critical.
 2. Never describe history: what changed, what it used to be, why an edit was made.
 3. If a comment is critical, every word must count. Plain English, no filler, as short as possible.
-4. Doc comments (JSDoc, docstrings, rustdoc, javadoc) are allowed for public API but must be concise: one short
-   sentence for the summary, tags only where they add information the signature does not.
-When unsure, delete. Respond with JSON only, no prose:
-{"verdicts":[{"id":<number>,"verdict":"keep"|"delete"|"rewrite"}]}"""
+When unsure, delete. Give one verdict per id: keep, delete, or rewrite when the comment is critical but not
+concise."""
+
+LLM_SCHEMA = json.dumps(
+    {
+        "type": "object",
+        "properties": {
+            "verdicts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "verdict": {"type": "string", "enum": ["keep", "delete", "rewrite"]},
+                    },
+                    "required": ["id", "verdict"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["verdicts"],
+        "additionalProperties": False,
+    }
+)
 
 
 def _judge_via_cli(prompt):
@@ -783,6 +803,8 @@ def _judge_via_cli(prompt):
             LLM_MODEL,
             "--output-format",
             "json",
+            "--json-schema",
+            LLM_SCHEMA,
             "--system-prompt",
             LLM_SYSTEM,
             prompt,
@@ -793,11 +815,11 @@ def _judge_via_cli(prompt):
         env=env,
     )
     if proc.returncode != 0:
-        return ""
+        return None
     payload = json.loads(proc.stdout)
     if not isinstance(payload, dict) or payload.get("is_error"):
-        return ""
-    return payload.get("result", "")
+        return None
+    return payload.get("structured_output")
 
 
 def llm_judge(comments):
@@ -809,9 +831,8 @@ def llm_judge(comments):
         items.append({"id": n, "kind": c.kind, "comment": c.text, "code_after": code})
     prompt = "Comments to review:\n" + json.dumps(items, indent=1)
     try:
-        result = _judge_via_cli(prompt)
-        m = re.search(r"\{.*\}", result, re.S)
-        verdicts = json.loads(m.group(0))["verdicts"] if m else []
+        output = _judge_via_cli(prompt)
+        verdicts = output["verdicts"] if isinstance(output, dict) else []
     except (OSError, ValueError, KeyError, subprocess.SubprocessError):
         return []
     findings = []
@@ -898,7 +919,7 @@ def format_reason(path, findings, density):
     lines.append(
         "Rules: comment only when critical to understanding the code. Never describe what changed or what "
         "was there before. When a comment is needed, use plain English and as few words as possible. "
-        "Doc comments on public API are fine but must be concise. Do not re-add the listed comments in a "
+        "Doc comments are fine but must be concise. Do not re-add the listed comments in a "
         "different form. Keep every other comment in the file as it was."
     )
     return "\n".join(lines)

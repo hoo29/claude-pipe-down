@@ -75,8 +75,10 @@ minority of edits. All comments from one edit go in a single request. Requests c
 across edits because the hook has to answer before each edit runs.
 
 The request runs through `claude -p` with the auth Claude Code already has, including a
-subscription. The CLI adds around 20k tokens of its own context per request. Measured cost was
-under one cent when that context was cached and about five cents when it was not.
+subscription. The verdict comes back as schema-constrained JSON through `--json-schema`, so the CLI
+must support that flag; on an older CLI the judge fails open and only the regex rules apply. The
+CLI adds around 20k tokens of its own context per request. Measured cost was under one cent when
+that context was cached and about five cents when it was not.
 
 If the request fails for any reason the edit is allowed. `PIPE_DOWN_MODEL` accepts `haiku`,
 `sonnet`, `opus` or a full model id.
