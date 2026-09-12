@@ -62,15 +62,16 @@ class Lang:
     doc_block: Optional[str] = None
     docstring: bool = False
     line_doc: bool = False  # line comments directly above a declaration are doc comments
+    strings: Tuple[str, ...] = ()  # delimiters of string literals that may span lines
 
 
-C_LIKE = Lang(line=("//",), block=("/*", "*/"), doc_line=("///", "//!"), doc_block="/**")
-GO = Lang(line=("//",), block=("/*", "*/"), line_doc=True)
+C_LIKE = Lang(line=("//",), block=("/*", "*/"), doc_line=("///", "//!"), doc_block="/**", strings=("`", '"""'))
+GO = Lang(line=("//",), block=("/*", "*/"), line_doc=True, strings=("`",))
 HASH = Lang(line=("#",))
 SHELL = Lang(line=("#",), line_doc=True)
 RUBY = Lang(line=("#",), line_doc=True)
 HASH_R = Lang(line=("#",), doc_line=("#'",))
-PYTHON = Lang(line=("#",), docstring=True)
+PYTHON = Lang(line=("#",), docstring=True, strings=('"""', "'''"))
 POWERSHELL = Lang(line=("#",), block=("<#", "#>"))
 HCL = Lang(line=("#", "//"), block=("/*", "*/"))
 DASH = Lang(line=("--",), block=("/*", "*/"))
@@ -198,7 +199,7 @@ def lang_for(path):
 TEST_PATH_RE = re.compile(
     r"(?:^|/)(?:tests?|specs?|__tests__|testing)/|"
     r"(?:^|/)test_[^/]*$|"
-    r"(?:_tests?|_specs?|\.tests?|\.specs?|Tests?|Specs?|IT)\.[A-Za-z0-9]+$"
+    r"(?:_tests?|_specs?|\.tests?|\.specs?|Tests?|Specs?|(?<=[a-z0-9])IT)\.[A-Za-z0-9]+$"
 )
 
 
@@ -246,9 +247,11 @@ TOP_LEVEL_DECL_RE = re.compile(r"^(?:export\s+|pub\s+)?(?:const|let|var|val|type
 PY_DOC_OPEN = re.compile(r"""^\s*[rRbBuU]{0,2}("{3}|'{3})""")
 
 
-def _find_marker(line, markers):
-    """Return (index, marker) of the first comment marker outside a string literal."""
+def _find_marker(line, markers, strings=()):
+    """Return the first comment marker outside a string literal as (index, marker) or None,
+    and the delimiter from `strings` left open at the end of the line, or None."""
     quote = None
+    found = None
     i = 0
     n = len(line)
     while i < n:
@@ -257,13 +260,19 @@ def _find_marker(line, markers):
             if ch == "\\":
                 i += 2
                 continue
-            if ch == quote:
+            if line.startswith(quote, i):
+                i += len(quote)
                 quote = None
+                continue
             i += 1
             continue
         if ch in ("'", '"', "`"):
             quote = ch
-            i += 1
+            for d in strings:
+                if line.startswith(d, i):
+                    quote = d
+                    break
+            i += len(quote)
             continue
         for m in markers:
             if line.startswith(m, i):
@@ -274,9 +283,12 @@ def _find_marker(line, markers):
                 if m == "--" and i + 2 < n and line[i + 2] in "-=>":
                     # Allow `-->` and `--=`.
                     break
-                return i, m
+                found = (i, m)
+                break
+        if found:
+            break
         i += 1
-    return None
+    return found, quote if quote in strings else None
 
 
 def _strip_block_line(s, lang):
@@ -317,51 +329,71 @@ def extract_comments(text, lang):
             return False
         return all(not s.startswith(m) for m in all_markers)
 
+    def block_open(stripped):
+        """Return (open, close, doc, body_start) when the line starts a block comment or docstring."""
+        if lang.block and stripped.startswith(lang.block[0]):
+            doc = lang.doc_block is not None and stripped.startswith(lang.doc_block)
+            return lang.block[0], lang.block[1], doc, len(lang.block[0])
+        doc_match = PY_DOC_OPEN.match(stripped) if lang.docstring else None
+        if doc_match:
+            quote = doc_match.group(1)
+            return quote, quote, True, doc_match.end()
+        return None
+
     def next_code_after(idx):
-        for j in range(idx, n):
+        j = idx
+        while j < n:
+            stripped = lines[j].strip()
+            opened = block_open(stripped)
+            if opened:
+                close_m = opened[1]
+                if close_m not in stripped[opened[3] :]:
+                    j += 1
+                    while j < n and close_m not in lines[j]:
+                        j += 1
+                j += 1
+                continue
             if is_code(lines[j]):
-                return lines[j].strip()
+                return stripped
+            j += 1
         return ""
 
+    open_string = None
     while i < n:
         line = lines[i]
+        head = 0
+        if open_string:
+            idx = line.find(open_string)
+            if idx < 0:
+                i += 1
+                continue
+            head = idx + len(open_string)
+            open_string = None
         stripped = line.strip()
         if not stripped:
             i += 1
             continue
 
         # Block comments and docstrings.
-        block: Optional[Tuple[str, str]] = None
-        doc = False
-        doc_match = PY_DOC_OPEN.match(stripped) if lang.docstring else None
-        if lang.block and stripped.startswith(lang.block[0]):
-            block = lang.block
-            doc = lang.doc_block is not None and stripped.startswith(lang.doc_block)
-        elif doc_match:
-            quote = doc_match.group(1)
-            block = (quote, quote)
-            doc = True
-        if block:
-            open_m, close_m = block
+        opened = block_open(stripped) if head == 0 else None
+        if opened:
+            open_m, close_m, doc, body_start = opened
             start = i
             body = []
-            if lang.doc_block and stripped.startswith(lang.doc_block):
-                first = stripped[len(lang.doc_block) :]
-            else:
-                first = stripped[len(open_m) :]
-            if lang.docstring and block[0] in ('"""', "'''"):
-                first = re.sub(r"""^[rRbBuU]{0,2}("{3}|'{3})""", "", stripped)
-            closed = close_m in first
+            rest = stripped[body_start:]
+            closed = close_m in rest
             if closed:
-                first = first[: first.index(close_m)]
-            body.append(first)
+                rest = rest[: rest.index(close_m)]
+            if doc and lang.doc_block and rest.startswith(lang.doc_block[len(open_m) :]):
+                rest = rest[len(lang.doc_block) - len(open_m) :]
+            body.append(rest)
             i += 1
             while not closed and i < n:
                 seg = lines[i]
                 if close_m in seg:
                     seg = seg[: seg.index(close_m)]
                     closed = True
-                body.append(_strip_block_line(seg, lang) if lang.block and block == lang.block else seg)
+                body.append(_strip_block_line(seg, lang) if lang.block and open_m == lang.block[0] else seg)
                 i += 1
             end = i - 1
             comments.append(
@@ -376,11 +408,11 @@ def extract_comments(text, lang):
             )
             continue
 
-        found = _find_marker(line, all_markers)
+        found, open_string = _find_marker(line[head:], all_markers, lang.strings)
         if not found:
             i += 1
             continue
-        idx, marker = found
+        idx, marker = head + found[0], found[1]
         code_before = line[:idx].strip()
         if code_before:
             comments.append(
@@ -403,7 +435,7 @@ def extract_comments(text, lang):
         body = []
         while i < n:
             cur = lines[i]
-            f = _find_marker(cur, all_markers)
+            f, _ = _find_marker(cur, all_markers)
             if not f or cur[: f[0]].strip():
                 break
             m = f[1]
@@ -454,7 +486,8 @@ URL_RE = re.compile(r"https?://|www\.", re.I)
 BDD_RE = re.compile(r"^(?:given|when|then|and|but|arrange|act|assert)\b", re.I)
 
 HISTORY_RE = re.compile(
-    r"\b(?:previously|formerly|originally|used to\b|no longer|"
+    r"\b(?:previously|formerly|originally|used to (?:be|have|do|work|live|exist)|"
+    r"no longer (?:needed|necessary|used|required|called|exists|relevant|applies)|"
     r"now (?:uses?|returns?|takes?|handles?|accepts?|supports?|calls?|checks?|does|is|are|has|have|"
     r"includes?|requires?|reads?|writes?|works?|runs?|expects?|allows?|delegates?|wraps?|"
     r"defaults?|passes?|skips?|throws?|raises?|logs?|ignores?|validates?|properly|correctly)|"
@@ -468,8 +501,8 @@ HISTORY_RE = re.compile(
     r"before (?:this|the) (?:change|refactor|fix|update)|after (?:the|this) (?:change|refactor|fix|update)|"
     r"(?:the )?(?:previous|earlier|prior) (?:version|implementation|code|behaviou?r|approach)|"
     r"(?:un)?like before|as before|same as before|kept for (?:backward|compat)|"
-    r"(?:re)?introduced|brought back|restored (?:the|from)|(?:re)?implemented|simplified from|"
-    r"extracted from|inlined from|no longer needed|not needed anymore|leftover|left over)\b",
+    r"(?:re)?introduced|brought back|restored the|(?:re)?implemented|simplified from|"
+    r"not needed anymore|left ?over from)\b",
     re.I,
 )
 
@@ -493,7 +526,7 @@ FILLER_RE = re.compile(
     r"in a nutshell|at the end of the day|needless to say|it should be noted|it is worth noting|"
     r"worth noting|keep in mind|bear in mind|remember (?:that|to)|don'?t forget|"
     r"a (?:simple|basic|small|little|quick) (?:function|helper|wrapper|utility|check)|"
-    r"nice|neat|clean|elegant|handy|convenient|straightforward|trivial|easy)\b",
+    r"nice|neat|elegant|handy|convenient|straightforward|trivial|easy)\b",
     re.I,
 )
 
@@ -532,15 +565,17 @@ NARRATIVE_RE = re.compile(
     r"log(?:s|ging)? (?:the|a|an)|print(?:s|ing)? (?:the|a|an)|appl(?:y|ies|ying) (?:the|a|an)|"
     r"extract(?:s|ing)? (?:the|a|an)|filter(?:s|ing)? (?:the|a|an|out)|sort(?:s|ing)? (?:the|a|an|by)|"
     r"map(?:s|ping)? (?:the|a|an|each|over)|wait(?:s|ing)? for|sleep|delay|try(?:ing)? to|attempt(?:s|ing)? to|"
-    r"if the|when the|register|render|mount|unmount|dispatch|emit|subscribe|unsubscribe|"
+    r"if the|when the|run(?:s|ning)? the|ignore the|default(?:s)? to|fall(?:s)? back|do the|does the|"
+    r"(?:register|render|mount|unmount|dispatch|emit|subscribe|unsubscribe|"
     r"increment|decrement|append|prepend|push|pop|insert|delete|destroy|dispose|release|"
     r"allocate|free|reset|clear|flush|drain|resolve|reject|throw|raise|catch|wrap|unwrap|"
     r"format|serializ|deserializ|encode|decode|encrypt|decrypt|hash|sign|verify|"
-    r"execute|run(?:s|ning)? the|invoke|trigger|notify|broadcast|forward|redirect|route|"
+    r"execute|invoke|trigger|notify|broadcast|forward|redirect|route|"
     r"authenticate|authoriz|connect|disconnect|bind|unbind|attach|detach|enable|disable|"
     r"toggle|switch|select|deselect|show|hide|display|draw|paint|animate|scroll|focus|blur|"
-    r"exit|quit|abort|cancel|stop|start|restart|pause|resume|continue|skip|ignore the|"
-    r"default(?:s)? to|fall(?:s)? back|do the|does the|perform)\b",
+    r"exit|quit|abort|cancel|stop|start|restart|pause|resume|continue|skip|perform)"
+    r"(?:e|es|s|ed|ing)?\s+(?:the|a|an|all|each|every|any|this|that|these|those|it|them|to|into|"
+    r"from|with|on|off|up|out|for|in|by|and|if|when|before|after)\b)",
     re.I,
 )
 
@@ -562,8 +597,10 @@ LABEL_RE = re.compile(
     re.I,
 )
 
-BANNER_RE = re.compile(r"(?:^|\s)[-=*#_~+.─-╿<>/\\|]{3,}(?:\s|$)")
-RAW_BANNER_RE = re.compile(r"^\s*(?://|#|--|;|/\*|\*)\s*[-=*#_~+.─-╿<>/\\|]{3,}")
+BANNER_CHARS = r"[-=*#_~+.─-╿<>/\\|]"
+NOT_ELLIPSIS = r"(?!\.+(?:[^-=*#_~+.─-╿<>/\\|]|$))"
+BANNER_RE = re.compile(r"(?:^|\s)" + NOT_ELLIPSIS + BANNER_CHARS + r"{3,}(?:\s|$)")
+RAW_BANNER_RE = re.compile(r"^\s*(?://|#|--|;|/\*|\*)\s*" + NOT_ELLIPSIS + BANNER_CHARS + r"{3,}")
 
 STOPWORDS = frozenset(
     "the a an and or of to for in on at by with from is are be been being this that these those it its we if then "
@@ -718,10 +755,10 @@ def find_problems(comment):
 # Diffing
 
 
-def added_comments(old_text, new_text, lang):
-    old_counts = Counter(c.key for c in extract_comments(old_text, lang)) if old_text else Counter()
+def added_comments(old_comments, new_comments):
+    old_counts = Counter(c.key for c in old_comments)
     added = []
-    for c in extract_comments(new_text, lang):
+    for c in new_comments:
         if old_counts[c.key] > 0:
             old_counts[c.key] -= 1
             continue
@@ -729,9 +766,9 @@ def added_comments(old_text, new_text, lang):
     return added
 
 
-def code_line_count(text, lang):
+def code_line_count(text, comments):
     comment_lines = set()
-    for c in extract_comments(text, lang):
+    for c in comments:
         if not c.trailing:
             comment_lines.update(range(c.start, c.end + 1))
     return sum(1 for i, ln in enumerate(text.split("\n")) if ln.strip() and i not in comment_lines)
@@ -773,7 +810,7 @@ LLM_SCHEMA = json.dumps(
                 "items": {
                     "type": "object",
                     "properties": {
-                        "id": {"type": "integer"},
+                        "id": {"type": "integer", "minimum": 0},
                         "verdict": {"type": "string", "enum": ["keep", "delete", "rewrite"]},
                     },
                     "required": ["id", "verdict"],
@@ -832,15 +869,21 @@ def llm_judge(comments):
     prompt = "Comments to review:\n" + json.dumps(items, indent=1)
     try:
         output = _judge_via_cli(prompt)
-        verdicts = output["verdicts"] if isinstance(output, dict) else []
-    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    verdicts = output.get("verdicts") if isinstance(output, dict) else None
+    if not isinstance(verdicts, list):
         return []
     findings = []
+    seen = set()
     for v in verdicts:
-        try:
-            c = comments[int(v["id"])]
-        except (KeyError, ValueError, IndexError, TypeError):
+        if not isinstance(v, dict):
             continue
+        n = v.get("id")
+        if isinstance(n, bool) or not isinstance(n, int) or n < 0 or n >= len(comments) or n in seen:
+            continue
+        seen.add(n)
+        c = comments[n]
         verdict = str(v.get("verdict", "")).lower()
         if verdict == "delete":
             findings.append((c, [("judge", "not critical to understanding")]))
@@ -959,8 +1002,11 @@ def main():
         offset = line_offset(file_text, old_string) if old_string is not None else 0
         if old_string and offset is not None:
             file_text = file_text.replace(old_string, new_text, 1)
-        added = added_comments(old_text, new_text, lang)
-        total_code += max(0, code_line_count(new_text, lang) - (code_line_count(old_text, lang) if old_text else 0))
+        old_comments = extract_comments(old_text, lang) if old_text else []
+        new_comments = extract_comments(new_text, lang)
+        added = added_comments(old_comments, new_comments)
+        old_code = code_line_count(old_text, old_comments) if old_text else 0
+        total_code += max(0, code_line_count(new_text, new_comments) - old_code)
         for c in added:
             if is_exempt(c, test_file):
                 continue
