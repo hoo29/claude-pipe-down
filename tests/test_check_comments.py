@@ -299,13 +299,18 @@ class JudgeTests(unittest.TestCase):
         finally:
             cc.subprocess.run = original
 
-    def test_cli_path_parses_fenced_json(self):
-        stdout = json.dumps({"result": '```json\n{"verdicts":[{"id":0,"verdict":"delete"}]}\n```'})
+    def test_cli_path_reads_structured_output(self):
+        stdout = json.dumps({"structured_output": {"verdicts": [{"id": 0, "verdict": "delete"}]}})
         findings = self.judge_with(stdout)
-        self.assertEqual([c.text for c, _ in findings], ["set x"], f"fenced JSON verdict not applied: {findings!r}")
+        self.assertEqual([c.text for c, _ in findings], ["set x"], f"structured verdict not applied: {findings!r}")
+
+    def test_cli_path_ignores_prose_result(self):
+        stdout = json.dumps({"result": '{"verdicts":[{"id":0,"verdict":"delete"}]}'})
+        findings = self.judge_with(stdout)
+        self.assertEqual(findings, [], f"text result without structured_output must fail open, got {findings!r}")
 
     def test_rewrite_verdict_gives_no_replacement_text(self):
-        stdout = json.dumps({"result": '{"verdicts":[{"id":1,"verdict":"rewrite","text":"Keep this"}]}'})
+        stdout = json.dumps({"structured_output": {"verdicts": [{"id": 1, "verdict": "rewrite", "text": "Keep this"}]}})
         findings = self.judge_with(stdout)
         self.assertEqual(
             [(c.text, p) for c, p in findings],
@@ -434,10 +439,10 @@ class HookTests(unittest.TestCase):
     def test_judge_command_override(self):
         fake = os.path.join(STATE_DIR, "fake-claude")
         argv_log = os.path.join(STATE_DIR, "fake-argv")
-        verdict = '{"verdicts":[{"id":0,"verdict":"delete"}]}'
+        verdict = {"verdicts": [{"id": 0, "verdict": "delete"}]}
         with open(fake, "w") as f:
             f.write(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {argv_log}\n")
-            f.write(f"printf '%s' '{json.dumps({'result': verdict})}'\n")
+            f.write(f"printf '%s' '{json.dumps({'structured_output': verdict})}'\n")
         os.chmod(fake, 0o755)
         inp = {"file_path": "/nonexistent/g.ts", "content": "// retry cap agreed with upstream team\nconst max = 3;\n"}
         env = {"PIPE_DOWN_LLM": "1", "PIPE_DOWN_CLAUDE": f"{fake} --"}
@@ -446,6 +451,7 @@ class HookTests(unittest.TestCase):
         with open(argv_log) as f:
             argv = f.read().splitlines()
         self.assertEqual(argv[:2], ["--", "-p"], f"PIPE_DOWN_CLAUDE args should precede -p, got {argv!r}")
+        self.assertIn("--json-schema", argv, f"judge should constrain output with --json-schema, got {argv!r}")
 
     def test_bad_input_allowed(self):
         env = dict(os.environ)
