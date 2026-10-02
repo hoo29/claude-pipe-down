@@ -160,6 +160,38 @@ class ExtractionTests(unittest.TestCase):
         self.assertFalse(cc.is_exempt(cs[0]), "comment after a shebang must not inherit the shebang exemption")
         self.assertEqual(cc.extract_comments("#!/bin/sh\necho hi\n", cc.SHELL), [], "shebang alone is not a comment")
 
+    def test_commit_heredoc_message(self):
+        cmd = 'git commit -m "$(cat <<\'EOF\'\nFix it\n\nIt\'s "quoted".\nEOF\n)"'
+        self.assertEqual(cc.commit_messages(cmd), ['Fix it\n\nIt\'s "quoted".'], "heredoc message")
+
+    def test_commit_message_forms(self):
+        cases = {
+            'cd x && git add . && git commit -am "Subject" -m "Body" && git push': ["Subject\n\nBody"],
+            'git -C sub commit -m"short"': ["short"],
+            "FOO=1 git commit --message=hello -- a.py": ["hello"],
+            "git commit -F - <<'EOF'\nSubject\n\nBody\nEOF": ["Subject\n\nBody"],
+            "git commit --amend --no-edit": [],
+            "git log --grep commit": [],
+            'echo "git commit -m x"': [],
+            'git commit -m "$(printf x)"': [],
+            'git commit -m "unterminated': [],
+            "printf x | git commit -F -": [],
+        }
+        for cmd, want in cases.items():
+            self.assertEqual(cc.commit_messages(cmd), want, f"messages for {cmd!r}")
+
+    def test_commit_message_file(self):
+        d = tempfile.mkdtemp()
+        os.mkdir(os.path.join(d, "sub"))
+        with open(os.path.join(d, "sub", "msg"), "w") as fh:
+            fh.write("From file\n")
+        self.assertEqual(cc.commit_messages("git -C sub commit -F msg", d), ["From file"], "-F path relative to -C")
+        self.assertEqual(cc.commit_messages("git commit -F missing", d), [], "missing -F file must be skipped")
+
+    def test_commit_trailers_split(self):
+        subject, body = cc.split_commit_message("Subject\n\nBody line\n\nCo-Authored-By: A <a@b>\nClaude-Session: x")
+        self.assertEqual((subject, body), ("Subject", "Body line"), "trailers must be dropped")
+
 
 class RuleTests(unittest.TestCase):
     def assertRule(self, rule, text, lang):
@@ -322,6 +354,45 @@ class RuleTests(unittest.TestCase):
         ]:
             self.assertFalse(cc.is_test_path(path), f"not a test path: {path!r}")
 
+    def commit_rules(self, message):
+        return [rule for rule, _ in cc.find_commit_problems(message)]
+
+    def test_commit_clean(self):
+        msg = "Treat a verb followed by a number as explanatory\n\nThe narrative rule matched any leading verb.\n"
+        self.assertEqual(self.commit_rules(msg + "\nCo-Authored-By: A <a@b>"), [], "clean commit")
+
+    def test_commit_subject_and_length(self):
+        self.assertIn("subject", self.commit_rules("x" * (cc.COMMIT_SUBJECT_CHARS + 1)))
+        self.assertIn("long", self.commit_rules("Subject\n\n" + padding(cc.COMMIT_MAX_WORDS + 1)))
+        self.assertEqual(self.commit_rules("Subject\n\n" + padding(cc.COMMIT_MAX_WORDS)), [], "at the limit")
+
+    def test_commit_filler(self):
+        for msg in ["This commit adds a flag", "Add flag\n\nI've added a flag in order to skip.", "Add flag simply"]:
+            self.assertIn("filler", self.commit_rules(msg), msg)
+        self.assertNotIn("filler", self.commit_rules("Simplify the parser"))
+
+    def test_commit_testing(self):
+        for body in ["All tests pass.", "Ran ruff and pyright.", "Testing: unit tests"]:
+            self.assertIn("testing", self.commit_rules("Add flag\n\n" + body), body)
+        self.assertIn("testing", self.commit_rules("Add flag, all tests pass"), "testing note in the subject")
+
+    def test_commit_files(self):
+        msg = "Add flag\n\n- hooks/check.py: parse flag\n- README.md: document it\n"
+        self.assertIn("files", self.commit_rules(msg))
+        self.assertNotIn("files", self.commit_rules("Add flag\n\n- Parse the flag\n- Document it\n"))
+
+    def test_commit_example(self):
+        for body in [
+            "For example `retry 3 times` was denied.",
+            "Reproduced with a comment above fetchUser.",
+            'Denied "a b", "c d" and "e f".',
+            "Input:\n\n    // retry 3 times\n",
+            "```\nx\n```",
+        ]:
+            self.assertIn("example", self.commit_rules("Fix rule\n\n" + body), body)
+        for body in ['Rename "old" to "new".', "- item\n    - nested item\n", "Use `--json-schema` output."]:
+            self.assertNotIn("example", self.commit_rules("Fix rule\n\n" + body), body)
+
 
 class DiffTests(unittest.TestCase):
     def test_existing_comments_not_reported(self):
@@ -404,6 +475,27 @@ class JudgeTests(unittest.TestCase):
         stdout = json.dumps({"is_error": True, "result": "Not logged in"})
         findings = self.judge_with(stdout)
         self.assertEqual(findings, [], f"judge error payload must fail open, got {findings!r}")
+
+    def commit_judge_with(self, output):
+        class Proc:
+            returncode = 0
+            stdout = json.dumps({"structured_output": output})
+
+        original = cc.subprocess.run
+        cc.subprocess.run = lambda *a, **k: Proc()
+        try:
+            return cc.commit_judge("Subject\n\nBody")
+        finally:
+            cc.subprocess.run = original
+
+    def test_commit_judge(self):
+        self.assertEqual(self.commit_judge_with({"verdict": "ok", "problems": []}), [], "ok verdict allows")
+        found = self.commit_judge_with({"verdict": "rewrite", "problems": ["example", "example", "bogus"]})
+        self.assertEqual(found, [("judge", cc.COMMIT_PROBLEMS["example"])], f"problems mapped once: {found!r}")
+        found = self.commit_judge_with({"verdict": "rewrite", "problems": []})
+        self.assertEqual(found, [("judge", cc.COMMIT_PROBLEMS["verbose"])], f"bare rewrite: {found!r}")
+        for payload in [None, [], {"verdict": "rewrite", "problems": 3}]:
+            self.commit_judge_with(payload)
 
 
 class HookTests(unittest.TestCase):
@@ -534,6 +626,15 @@ class HookTests(unittest.TestCase):
             argv = f.read().splitlines()
         self.assertEqual(argv[:2], ["--", "-p"], f"PIPE_DOWN_CLAUDE args should precede -p, got {argv!r}")
         self.assertIn("--json-schema", argv, f"judge should constrain output with --json-schema, got {argv!r}")
+
+    def test_commit_denied_and_allowed(self):
+        bad = {"command": 'git commit -m "This commit adds a flag"'}
+        reason = deny_reason("Bash", bad, session="commit1")
+        self.assertIn("filler wording", reason, f"reason: {reason!r}")
+        self.assertIsNone(run_hook("Bash", {"command": 'git commit -m "Add flag"'}, session="commit1"))
+        self.assertIsNone(run_hook("Bash", {"command": "ls"}, session="commit1"), "non-commit Bash allowed")
+        out = run_hook("Bash", bad, session="commit2", env_extra={"PIPE_DOWN_COMMITS": "0"})
+        self.assertIsNone(out, f"PIPE_DOWN_COMMITS=0 must allow, got {out!r}")
 
     def test_bad_input_allowed(self):
         env = dict(os.environ)

@@ -2,7 +2,8 @@
 
 A Claude Code plugin that stops Claude over-commenting code. It runs as a `PreToolUse` hook on
 `Edit`, `Write` and `MultiEdit`, inspects the comments the edit would add, and rejects the edit
-with a line-by-line reason when they break the rules below. Claude resubmits without them.
+with a line-by-line reason when they break the rules below. Claude resubmits without them. It also
+checks the message of every `git commit` Claude runs through `Bash`, see [Commit messages](#commit-messages).
 
 Rules enforced:
 
@@ -57,10 +58,43 @@ A comment that explains why is kept even when it also matches the restate or nar
 Words such as because, otherwise, workaround, race, must, never, deprecated, spec, RFC and
 issue references mark a comment as explanatory.
 
+## Commit messages
+
+A second `PreToolUse` hook on `Bash` reads the message passed to `git commit` and rejects it with a
+reason when it breaks these rules:
+
+1. Say what changed and why at the level of the general cause. For a bug, describe the condition that
+   triggers it, not the example that exposed it.
+2. Do not list files, restate the diff or describe how the change was tested.
+3. Plain English, as few words as possible.
+
+| Rule | Example | Reason given |
+| --- | --- | --- |
+| subject | subject line over 72 characters | subject length |
+| long | body over 80 words | word limit |
+| filler | `This commit adds`, `I've updated`, `in order to`, `successfully` | filler wording |
+| testing | `All tests pass`, `Ran ruff and pyright`, a `Testing:` section | describes how the change was tested |
+| files | two or more bullets that start with a file path | lists changed files |
+| example | `for example`, `e.g.`, `reproduced with`, a code block, three or more quoted strings | describes a specific example instead of the general cause |
+
+Trailers such as `Co-Authored-By` and `Signed-off-by` are not checked. Messages that pass the regex
+stage go to the model judge, which flags example-specific detail, restated diffs, testing notes,
+verbosity and filler.
+
+The message is read from `-m`, `--message`, `-F`, `--file`, a `$(cat <<'EOF' ... EOF)` heredoc and
+`-F -` fed by a heredoc or `<` redirect. Commands chained with `&&`, `;` or `|` and global options
+such as `git -C dir` are handled. When the message cannot be determined, for example from a pipe,
+a variable, command substitution other than `cat`, or an editor, the commit is allowed.
+
+The hook uses an `if` filter of `Bash(*git*commit*)` so other commands do not start Python. Claude
+Code versions without `if` support run it on every `Bash` call, which exits early when the command
+does not contain `commit`.
+
 ## Loop guard
 
 If the same file is denied twice in one session the third attempt is allowed, so an unhelpful
-heuristic cannot block progress. The counter resets after any allowed edit to that file.
+heuristic cannot block progress. The counter resets after any allowed edit to that file. Commit
+messages share one counter per session.
 
 ## Model judge
 
@@ -94,6 +128,9 @@ Set these in the `env` block of `settings.json` or in the shell that launches Cl
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PIPE_DOWN_DISABLE` | `0` | Set to `1` to turn the hook off |
+| `PIPE_DOWN_COMMITS` | `1` | Set to `0` to stop checking commit messages |
+| `PIPE_DOWN_COMMIT_SUBJECT_CHARS` | `72` | Character limit for a commit subject line |
+| `PIPE_DOWN_COMMIT_MAX_WORDS` | `80` | Word limit for a commit body, trailers excluded |
 | `PIPE_DOWN_BDD` | `1` | Set to `0` to check Given/When/Then markers in test files like any other comment |
 | `PIPE_DOWN_MAX_WORDS` | `25` | Word limit for a non-doc comment |
 | `PIPE_DOWN_MAX_LINES` | `3` | Consecutive comment lines that count as a block |
@@ -101,8 +138,8 @@ Set these in the `env` block of `settings.json` or in the shell that launches Cl
 | `PIPE_DOWN_DOC_MAX_DESC_WORDS` | `30` | Word limit for a doc comment description before tags |
 | `PIPE_DOWN_DENSITY_MIN_COMMENTS` | `3` | Minimum added comments before density is checked |
 | `PIPE_DOWN_DENSITY_PERCENT` | `30` | Comments as a percentage of added code lines |
-| `PIPE_DOWN_MAX_DENIALS` | `2` | Denials per file per session before the edit is allowed |
-| `PIPE_DOWN_LLM` | `1` | Set to `0` to disable the model judge |
+| `PIPE_DOWN_MAX_DENIALS` | `2` | Denials per file, or for commits, per session before the call is allowed |
+| `PIPE_DOWN_LLM` | `1` | Set to `0` to disable the model judge for comments and commits |
 | `PIPE_DOWN_MODEL` | `haiku` | Judge model: `haiku`, `sonnet`, `opus` or a full model id |
 | `PIPE_DOWN_LLM_TIMEOUT` | `40` | Seconds to wait for the judge |
 | `PIPE_DOWN_CLAUDE` | `claude` | Command that runs the judge, judge arguments are appended |
