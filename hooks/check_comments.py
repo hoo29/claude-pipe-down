@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""PreToolUse hook that rejects low-value comments added by Edit, Write and MultiEdit.
+"""PreToolUse hook that rejects low-value comments added by Edit, Write and MultiEdit, and
+verbose commit messages passed to `git commit` through Bash.
 
 Reads the hook event JSON on stdin. Emits a deny decision on stdout when the edit adds
 comments that describe history, restate the code, or are longer than needed. Doc comments
@@ -49,6 +50,9 @@ LLM_COMMAND = shlex.split(os.environ.get("PIPE_DOWN_CLAUDE", "")) or ["claude"]
 LLM_TIMEOUT = _env_int("PIPE_DOWN_LLM_TIMEOUT", 40)
 DISABLED = _env_flag("PIPE_DOWN_DISABLE", False)
 ALLOW_BDD = _env_flag("PIPE_DOWN_BDD", True)
+CHECK_COMMITS = _env_flag("PIPE_DOWN_COMMITS", True)
+COMMIT_SUBJECT_CHARS = _env_int("PIPE_DOWN_COMMIT_SUBJECT_CHARS", 72)
+COMMIT_MAX_WORDS = _env_int("PIPE_DOWN_COMMIT_MAX_WORDS", 80)
 KEEP_MARKER = "pipe-down: keep"
 
 # Language table
@@ -824,7 +828,7 @@ LLM_SCHEMA = json.dumps(
 )
 
 
-def _judge_via_cli(prompt):
+def _judge_via_cli(prompt, system=LLM_SYSTEM, schema=LLM_SCHEMA):
     env = dict(os.environ)
     env.pop("CLAUDECODE", None)
     proc = subprocess.run(
@@ -841,9 +845,9 @@ def _judge_via_cli(prompt):
             "--output-format",
             "json",
             "--json-schema",
-            LLM_SCHEMA,
+            schema,
             "--system-prompt",
-            LLM_SYSTEM,
+            system,
             prompt,
         ],
         capture_output=True,
@@ -890,6 +894,305 @@ def llm_judge(comments):
         elif verdict == "rewrite":
             findings.append((c, [("judge", "not concise; shorten or remove")]))
     return findings
+
+
+# Commit messages
+
+HEREDOC_RE = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_]\w*)\1([^\n]*)\n(.*?)\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
+HEREDOC_TOKEN = "__pipe_down_heredoc_{}__"
+HEREDOC_TOKEN_RE = re.compile(r"__pipe_down_heredoc_(\d+)__")
+CAT_HEREDOC_RE = re.compile(r"\$\(\s*cat\s+<<\s*__pipe_down_heredoc_(\d+)__\s*\)")
+SHELL_PUNCT = ";&|()<>\n"
+GIT_GLOBAL_VALUE_OPTS = frozenset(("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"))
+COMMIT_VALUE_OPTS = frozenset(
+    (
+        "--author",
+        "--date",
+        "--template",
+        "--reuse-message",
+        "--reedit-message",
+        "--fixup",
+        "--squash",
+        "--trailer",
+        "--pathspec-from-file",
+        "--cleanup",
+    )
+)
+COMMIT_SHORT_VALUE_OPTS = "mFcCt"
+
+
+def _shell_tokens(command):
+    lex = shlex.shlex(command, posix=True, punctuation_chars=SHELL_PUNCT)
+    lex.whitespace = " \t\r"
+    lex.whitespace_split = True
+    lex.commenters = ""
+    return list(lex)
+
+
+def _is_punct(token):
+    return bool(token) and all(ch in SHELL_PUNCT for ch in token)
+
+
+def _commit_segments(tokens):
+    """Yield (git_global_args, commit_args, redirects) for each `git commit` in the token list."""
+    segment = []
+    for tok in [*tokens, ";"]:
+        if not _is_punct(tok) or tok in ("<", "<<"):
+            segment.append(tok)
+            continue
+        found = _parse_git_commit(segment)
+        if found:
+            yield found
+        segment = []
+
+
+def _parse_git_commit(segment):
+    i = 0
+    while i < len(segment) and re.match(r"^[A-Za-z_]\w*=", segment[i]):
+        i += 1
+    if i >= len(segment) or os.path.basename(segment[i]) != "git":
+        return None
+    i += 1
+    global_args = []
+    while i < len(segment) and segment[i].startswith("-"):
+        global_args.append(segment[i])
+        if segment[i] in GIT_GLOBAL_VALUE_OPTS and i + 1 < len(segment):
+            global_args.append(segment[i + 1])
+            i += 1
+        i += 1
+    if i >= len(segment) or segment[i] != "commit":
+        return None
+    args = []
+    redirects = {}
+    rest = segment[i + 1 :]
+    j = 0
+    while j < len(rest):
+        if rest[j] in ("<", "<<") and j + 1 < len(rest):
+            redirects[rest[j]] = rest[j + 1]
+            j += 2
+            continue
+        args.append(rest[j])
+        j += 1
+    return global_args, args, redirects
+
+
+def _commit_sources(args):
+    """Return the -m values and -F paths in order, or None when the options cannot be read."""
+    sources = []
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        nxt = args[i + 1] if i + 1 < len(args) else None
+        i += 1
+        if tok == "--":
+            break
+        if tok.startswith("--"):
+            name, eq, value = tok.partition("=")
+            if name in ("--message", "--file"):
+                if not eq:
+                    if nxt is None:
+                        return None
+                    value = nxt
+                    i += 1
+                sources.append(("m" if name == "--message" else "F", value))
+            elif name in COMMIT_VALUE_OPTS and not eq:
+                i += 1
+            continue
+        if not tok.startswith("-") or tok == "-":
+            continue
+        for k, ch in enumerate(tok[1:], 1):
+            if ch in COMMIT_SHORT_VALUE_OPTS:
+                value = tok[k + 1 :]
+                if not value:
+                    if nxt is None:
+                        return None
+                    value = nxt
+                    i += 1
+                if ch in "mF":
+                    sources.append((ch, value))
+                break
+    return sources
+
+
+def _resolve_heredocs(text, bodies):
+    text = CAT_HEREDOC_RE.sub(lambda m: bodies[int(m.group(1))], text)
+    if HEREDOC_TOKEN_RE.search(text) or "$(" in text or "`" in text:
+        return None
+    return text
+
+
+def commit_messages(command, cwd=""):
+    """Return the messages `git commit` calls in a shell command would record.
+
+    A commit whose message cannot be determined statically is skipped.
+    """
+    bodies = []
+
+    def stash(m):
+        bodies.append(m.group(4))
+        return "<<" + HEREDOC_TOKEN.format(len(bodies) - 1) + m.group(3)
+
+    try:
+        tokens = _shell_tokens(HEREDOC_RE.sub(stash, command))
+    except ValueError:
+        return []
+    messages = []
+    for global_args, args, redirects in _commit_segments(tokens):
+        sources = _commit_sources(args)
+        if not sources:
+            continue
+        base = cwd
+        for k, arg in enumerate(global_args[:-1]):
+            if arg == "-C":
+                base = os.path.join(base, global_args[k + 1])
+        parts = []
+        for kind, value in sources:
+            if kind == "m":
+                text = _resolve_heredocs(value, bodies)
+            elif value == "-":
+                heredoc = HEREDOC_TOKEN_RE.fullmatch(redirects.get("<<", ""))
+                if heredoc:
+                    text = bodies[int(heredoc.group(1))]
+                elif "<" in redirects:
+                    text = read_file(os.path.join(base, redirects["<"])) or None
+                else:
+                    text = None
+            else:
+                text = read_file(os.path.join(base, value)) or None
+            if text is None:
+                parts = None
+                break
+            parts.append(text.strip("\n"))
+        if parts:
+            messages.append("\n\n".join(parts))
+    return messages
+
+
+TRAILER_RE = re.compile(r"^(?:[A-Za-z]+(?:-[A-Za-z]+)+|Fixes|Closes|Resolves|Refs?|Bug|Issue): \S", re.I)
+BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+PATH_BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+`?(?:[\w.-]+/)*[\w-]+\.[A-Za-z0-9]{1,6}`?(?::|\s+[-:(]|$)")
+QUOTED_RE = re.compile(r"\"[^\"\n]{1,80}\"|`[^`\n]*[\s\"'][^`\n]*`")
+
+COMMIT_FILLER_RE = re.compile(
+    r"\b(?:this (?:commit|change|pr|pull request|patch) (?:adds|fixes|updates|introduces|implements|removes|"
+    r"changes|makes|refactors|improves|addresses|ensures|modifies|resolves)|basically|simply|essentially|"
+    r"in order to|note that|please note|it is (?:important|worth) (?:to note|noting)|worth noting|"
+    r"needless to say|as (?:requested|discussed|you asked)|per (?:your|the user'?s?) (?:request|instructions|"
+    r"feedback)|successfully|seamless(?:ly)?|various (?:changes|improvements|fixes|updates|tweaks)|"
+    r"(?:minor|small|several|some) (?:tweaks|improvements|cleanups?)|i(?:'ve| have| added| fixed| changed| "
+    r"updated| made)|let me|here(?:'s| is) (?:the|a|what))\b",
+    re.I,
+)
+COMMIT_TESTING_RE = re.compile(
+    r"(?:\b(?:all (?:the )?(?:\w+ )?tests (?:pass|passed|passing)|tests? (?:pass|passes|passed) (?:locally|now)|"
+    r"ran (?:the )?(?:tests|test suite|unit tests|ruff|pyright|mypy|eslint|linters?|formatters?)|"
+    r"verified (?:locally|manually|by running|that (?:it|this|the tests))|tested (?:locally|manually|by running)|"
+    r"(?:lint|linting|typecheck|type check)s? (?:pass|passes|is clean|are clean))\b|"
+    r"^\s*(?:testing|tests run|test plan|verification|validation):)",
+    re.I | re.M,
+)
+COMMIT_EXAMPLE_RE = re.compile(
+    r"\b(?:for example|for instance|e\.g\.|reproduced (?:by|with|using|when)|repro(?:duction)?(?: steps)?:|"
+    r"steps to reproduce|the (?:user'?s|reported|given|failing|original) (?:example|case|input|scenario)|"
+    r"(?:as )?reported by|in the example)(?=\W|$)",
+    re.I,
+)
+
+
+def split_commit_message(message):
+    """Return (subject, body) with trailers such as Co-Authored-By removed."""
+    paragraphs = [p for p in re.split(r"\n[ \t]*\n", message.strip("\n")) if p.strip()]
+    if len(paragraphs) > 1 and all(TRAILER_RE.match(ln) for ln in paragraphs[-1].splitlines() if ln.strip()):
+        paragraphs.pop()
+    if not paragraphs:
+        return "", ""
+    lines = paragraphs[0].split("\n")
+    subject = lines[0].strip()
+    body = "\n\n".join(["\n".join(lines[1:]).strip("\n"), *paragraphs[1:]]).strip("\n")
+    return subject, body
+
+
+def find_commit_problems(message):
+    """Return a list of (rule, detail) tuples for a commit message."""
+    subject, body = split_commit_message(message)
+    text = subject + "\n\n" + body
+    problems = []
+    if len(subject) > COMMIT_SUBJECT_CHARS:
+        problems.append(("subject", f"subject is {len(subject)} characters, limit is {COMMIT_SUBJECT_CHARS}"))
+    words = _word_count(body)
+    if words > COMMIT_MAX_WORDS:
+        problems.append(("long", f"body is {words} words, limit is {COMMIT_MAX_WORDS}"))
+    fill = COMMIT_FILLER_RE.search(text)
+    if fill:
+        problems.append(("filler", f"filler wording: '{fill.group(0)}'"))
+    if COMMIT_TESTING_RE.search(text):
+        problems.append(("testing", "describes how the change was tested"))
+    if sum(1 for ln in body.splitlines() if PATH_BULLET_RE.match(ln)) >= 2:
+        problems.append(("files", "lists changed files"))
+    example = COMMIT_EXAMPLE_RE.search(body)
+    code_sample = re.search(r"^```|\n[ \t]*\n(?: {4,}|\t)(?![-*+\d])\S", "\n" + body, re.M)
+    if example or code_sample or len(QUOTED_RE.findall(body)) >= 3:
+        problems.append(("example", "describes a specific example instead of the general cause"))
+    return problems
+
+
+COMMIT_SYSTEM = """You review git commit messages written by an AI assistant. Apply these rules strictly:
+1. Describe what changed and why at the level of the general cause. When a bug was found through a specific
+   example, state the class of input or condition that triggers it, not the example's literal values, names
+   or steps. Flag "example" when the message carries detail that only fits the example.
+2. Do not list files, restate the diff line by line, or say how the change was tested. Flag "restates_diff" or
+   "testing".
+3. Plain English, as few words as possible, no filler. Flag "verbose" when sentences or words could go
+   without losing meaning, "filler" for padding phrases.
+Trailer lines such as Co-Authored-By are not shown. When unsure, flag. Give verdict ok or rewrite, and list
+every problem that applies."""
+
+COMMIT_PROBLEMS = {
+    "example": "describes a specific example instead of the general cause",
+    "restates_diff": "restates the diff",
+    "testing": "describes how the change was tested",
+    "verbose": "not concise",
+    "filler": "filler wording",
+}
+
+COMMIT_SCHEMA = json.dumps(
+    {
+        "type": "object",
+        "properties": {
+            "verdict": {"type": "string", "enum": ["ok", "rewrite"]},
+            "problems": {"type": "array", "items": {"type": "string", "enum": sorted(COMMIT_PROBLEMS)}},
+        },
+        "required": ["verdict", "problems"],
+        "additionalProperties": False,
+    }
+)
+
+
+def commit_judge(message):
+    subject, body = split_commit_message(message)
+    prompt = "Commit message to review:\n" + (subject + "\n\n" + body).strip()
+    try:
+        output = _judge_via_cli(prompt, COMMIT_SYSTEM, COMMIT_SCHEMA)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    if not isinstance(output, dict) or output.get("verdict") != "rewrite":
+        return []
+    raw = output.get("problems")
+    names = [p for p in raw if isinstance(p, str)] if isinstance(raw, list) else []
+    details = [COMMIT_PROBLEMS[p] for p in dict.fromkeys(names) if p in COMMIT_PROBLEMS]
+    return [("judge", d) for d in details or [COMMIT_PROBLEMS["verbose"]]]
+
+
+def format_commit_reason(problems):
+    lines = ["pipe-down: this commit message breaks the commit message rules. Rewrite it and commit again."]
+    lines.extend(f"- {detail}" for _, detail in problems)
+    lines.append(
+        "Rules: a short subject line. The body says what changed and why at the level of the general cause; "
+        "for a bug, describe the condition that triggers it, not the example that exposed it. Do not list "
+        "files, restate the diff or describe testing. Plain English, as few words as possible. Keep trailer "
+        "lines as they were."
+    )
+    return "\n".join(lines)
 
 
 # Denial bookkeeping
@@ -976,6 +1279,40 @@ def emit(decision, reason=None):
     sys.stdout.flush()
 
 
+def finish(session, target, reason):
+    """Emit a deny with `reason`, or allow when it is None, applying the per-target denial limit."""
+    key = f"{session}|{target}"
+    state = load_state()
+    if reason is None:
+        if key in state:
+            del state[key]
+            save_state(state)
+        return 0
+    count = state.get(key, {}).get("n", 0)
+    if count >= MAX_DENIALS:
+        state.pop(key, None)
+        save_state(state)
+        sys.stderr.write(f"pipe-down: denial limit reached for {target}, allowing\n")
+        return 0
+    state[key] = {"n": count + 1, "t": time.time()}
+    save_state(state)
+    emit("deny", reason)
+    return 0
+
+
+def check_commit(event, command):
+    messages = commit_messages(command, event.get("cwd") or "")
+    if not messages:
+        return 0
+    problems = []
+    for message in messages:
+        found = find_commit_problems(message)
+        if not found and USE_LLM:
+            found = commit_judge(message)
+        problems.extend(found)
+    return finish(event.get("session_id", ""), "git commit", format_commit_reason(problems) if problems else None)
+
+
 def main():
     if DISABLED:
         return 0
@@ -985,6 +1322,11 @@ def main():
         return 0
     tool_name = event.get("tool_name", "")
     tool_input = event.get("tool_input") or {}
+    if tool_name == "Bash":
+        command = tool_input.get("command")
+        if not CHECK_COMMITS or not isinstance(command, str) or "commit" not in command:
+            return 0
+        return check_commit(event, command)
     path, changes = collect_changes(tool_name, tool_input)
     if not path or not changes:
         return 0
@@ -1029,26 +1371,11 @@ def main():
         for c, problems in judged:
             findings.append((c, problems, line_by_id.get(id(c))))
 
-    session = event.get("session_id", "")
-    key = f"{session}|{path}"
-    state = load_state()
-    if not findings and not density:
-        if key in state:
-            del state[key]
-            save_state(state)
-        return 0
-
-    count = state.get(key, {}).get("n", 0)
-    if count >= MAX_DENIALS:
-        state.pop(key, None)
-        save_state(state)
-        sys.stderr.write(f"pipe-down: denial limit reached for {path}, allowing edit\n")
-        return 0
-    state[key] = {"n": count + 1, "t": time.time()}
-    save_state(state)
-    findings.sort(key=lambda f: (f[2] if f[2] is not None else 10**9, f[0].start))
-    emit("deny", format_reason(path, findings, density))
-    return 0
+    reason = None
+    if findings or density:
+        findings.sort(key=lambda f: (f[2] if f[2] is not None else 10**9, f[0].start))
+        reason = format_reason(path, findings, density)
+    return finish(event.get("session_id", ""), path, reason)
 
 
 if __name__ == "__main__":

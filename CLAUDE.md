@@ -1,13 +1,16 @@
 # CLAUDE.md
 
 Claude Code plugin. A PreToolUse hook on Edit, Write and MultiEdit that rejects edits adding
-low-value comments. Everything lives in `hooks/check_comments.py`; there are no dependencies.
+low-value comments, and on Bash that rejects verbose `git commit` messages. Everything lives in
+`hooks/check_comments.py`; there are no dependencies.
 
 ## Layout
 
 - `.claude-plugin/plugin.json`: plugin manifest. `marketplace.json` makes the repo its own marketplace.
 - `hooks/hooks.json`: hook registration. Command is `python3 "${CLAUDE_PLUGIN_ROOT}/hooks/check_comments.py"`.
-- `hooks/check_comments.py`: extraction, rules, diffing, denial counter, optional model judge.
+  The Bash entry has `"if": "Bash(*git*commit*)"` so other commands do not start Python.
+- `hooks/check_comments.py`: extraction, rules, diffing, denial counter, optional model judge, and
+  commit message extraction and rules.
 - `tests/test_check_comments.py`: unittest suite. Run with `python3 -m unittest discover -s tests`.
 - `pyproject.toml`: ruff and pyright config. Run `ruff check .`, `ruff format .` and `pyright` before finishing.
 
@@ -19,6 +22,7 @@ low-value comments. Everything lives in `hooks/check_comments.py`; there are no 
 - Output is JSON on stdout with `permissionDecision: deny`, exit 0. Never exit 2.
 - Keep the hook fast. The regex path runs on every file edit. The judge only runs when unflagged
   comments remain, and must stay switchable with `PIPE_DOWN_LLM=0`.
+- Commit messages that cannot be read statically are allowed. Trailers are never checked.
 - Rule changes need a test in `RuleTests`. Extraction changes need a test in `ExtractionTests`.
 - README tables and the config variable list must match the code.
 - CI (`.github/workflows/ci.yml`) runs ruff, pyright, the tests and a manifest JSON check. All must pass.

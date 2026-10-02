@@ -1,5 +1,5 @@
 {
-  "description": "Rejects Edit, Write and MultiEdit calls that add low-value comments.",
+  "description": "Rejects Edit, Write and MultiEdit calls that add low-value comments, and verbose git commit messages.",
   "hooks": {
     "PreToolUse": [
       {
@@ -7,6 +7,17 @@
         "hooks": [
           {
             "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/check_comments.py\"",
+            "timeout": 60
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(*git*commit*)",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/check_comments.py\"",
             "timeout": 60
           }

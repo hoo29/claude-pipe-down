@@ -8,8 +8,8 @@
     {
       "name": "pipe-down",
       "source": "./",
-      "description": "PreToolUse hook that rejects redundant, verbose or change-history code comments before they are written.",
-      "version": "0.5.0"
+      "description": "PreToolUse hook that rejects redundant, verbose or change-history code comments and verbose commit messages before they are written.",
+      "version": "0.6.0"
     }
   ]
 }
